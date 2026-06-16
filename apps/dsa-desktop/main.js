@@ -928,7 +928,7 @@ function startBackend({ port, envFile, dbPath, logDir }) {
     LOG_DIR: logDir,
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8',
-    SCHEDULE_ENABLED: 'false',
+    // 不强制 SCHEDULE_ENABLED：由用户配置决定，保存后运行期生效（#1581）
     WEBUI_ENABLED: 'false',
     BOT_ENABLED: 'false',
     DINGTALK_STREAM_ENABLED: 'false',
