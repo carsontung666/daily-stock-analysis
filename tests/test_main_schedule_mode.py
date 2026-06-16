@@ -156,6 +156,8 @@ class MainScheduleModeTestCase(unittest.TestCase):
             run_immediately,
             background_tasks=None,
             schedule_time_provider=None,
+            schedule_times=None,
+            schedule_times_provider=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately
@@ -202,6 +204,8 @@ class MainScheduleModeTestCase(unittest.TestCase):
             run_immediately,
             background_tasks=None,
             schedule_time_provider=None,
+            schedule_times=None,
+            schedule_times_provider=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["resolved_schedule_time"] = (
@@ -242,6 +246,8 @@ class MainScheduleModeTestCase(unittest.TestCase):
             run_immediately,
             background_tasks=None,
             schedule_time_provider=None,
+            schedule_times=None,
+            schedule_times_provider=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately
@@ -296,6 +302,8 @@ class MainScheduleModeTestCase(unittest.TestCase):
             run_immediately,
             background_tasks=None,
             schedule_time_provider=None,
+            schedule_times=None,
+            schedule_times_provider=None,
         ):
             scheduled_call["background_tasks"] = background_tasks or []
 
@@ -408,6 +416,8 @@ class MainScheduleModeTestCase(unittest.TestCase):
             run_immediately,
             background_tasks=None,
             schedule_time_provider=None,
+            schedule_times=None,
+            schedule_times_provider=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately
@@ -434,6 +444,49 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(scheduled_call["run_immediately"], True)
         self.assertEqual(scheduled_call["background_tasks"], [])
         error_log.assert_called_once()
+
+    def test_serve_schedule_mode_skips_cli_scheduler(self) -> None:
+        args = self._make_args(serve=True, schedule=True, host="127.0.0.1", port=8000)
+        config = self._make_config(schedule_enabled=True)
+        cli_called = []
+
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}, clear=False), \
+             patch("main.parse_arguments", return_value=args), \
+             patch("main.get_config", return_value=config), \
+             patch("main.prepare_webui_frontend_assets", return_value=True), \
+             patch("main.start_api_server"), \
+             patch("main.start_bot_stream_clients"), \
+             patch("main.run_full_analysis") as run_full_analysis, \
+             patch("src.scheduler.run_with_schedule", side_effect=lambda *a, **k: cli_called.append(True)), \
+             patch("main.time.sleep", side_effect=KeyboardInterrupt):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(cli_called, [])
+        run_full_analysis.assert_not_called()
+
+    def test_schedule_providers_hot_reload_from_env_file(self) -> None:
+        # provider 必须读 .env 最新值：编辑后即时生效
+        with patch.dict(os.environ, {}, clear=False):
+            for key in ("SCHEDULE_TIMES", "SCHEDULE_TIME", "SCHEDULE_ENABLED"):
+                os.environ.pop(key, None)
+
+            self.env_path.write_text(
+                "STOCK_LIST=600519\nSCHEDULE_TIMES=09:30,15:00\nSCHEDULE_ENABLED=true\n",
+                encoding="utf-8",
+            )
+            Config.reset_instance()
+            times_provider = main._build_schedule_times_provider()
+            enabled_provider = main._build_schedule_enabled_provider()
+            self.assertEqual(times_provider(), ["09:30", "15:00"])
+            self.assertTrue(enabled_provider())
+
+            self.env_path.write_text(
+                "STOCK_LIST=600519\nSCHEDULE_TIMES=08:00,12:00,20:00\nSCHEDULE_ENABLED=false\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(times_provider(), ["08:00", "12:00", "20:00"])
+            self.assertFalse(enabled_provider())
 
     def test_reload_runtime_config_preserves_process_env_overrides(self) -> None:
         self.env_path.write_text(

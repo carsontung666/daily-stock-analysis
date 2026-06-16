@@ -180,14 +180,56 @@ def _schedule_stock_index_background_refresh(app: FastAPI, reason: str) -> None:
     )
 
 
+def _start_runtime_scheduler(app: FastAPI) -> None:
+    """在 lifespan 内创建运行时调度服务（本进程唯一调度 owner）；初始化失败仅记录，不影响 API 启动。"""
+    app.state.runtime_scheduler = None
+    try:
+        from main import (
+            build_scheduled_task,
+            _build_schedule_times_provider,
+            _build_schedule_enabled_provider,
+        )
+        from src.services.runtime_scheduler_service import RuntimeSchedulerService
+        from src.config import get_config
+
+        config = get_config()
+        enabled_provider = _build_schedule_enabled_provider()
+        service = RuntimeSchedulerService(
+            task=build_scheduled_task(),
+            schedule_times_provider=_build_schedule_times_provider(),
+            enabled_provider=enabled_provider,
+        )
+        app.state.runtime_scheduler = service
+        service.reconcile_from_config()
+        if enabled_provider() and config.schedule_run_immediately:
+            service.run_now()
+        logger.info("[scheduler] runtime scheduler initialized (running=%s)", service.is_running())
+    except Exception as exc:
+        logger.warning("[scheduler] runtime scheduler init skipped: %s", exc)
+
+
+def _stop_runtime_scheduler(app: FastAPI) -> None:
+    service = getattr(app.state, "runtime_scheduler", None)
+    if service is None:
+        return
+    try:
+        service.stop()
+    except Exception as exc:
+        logger.warning("[scheduler] runtime scheduler stop failed: %s", exc)
+    finally:
+        app.state.runtime_scheduler = None
+
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
     app.state.system_config_service = SystemConfigService()
     _schedule_stock_index_background_refresh(app, "startup")
+    _start_runtime_scheduler(app)
     try:
         yield
     finally:
+        _stop_runtime_scheduler(app)
         refresh_task = getattr(app.state, "stock_index_refresh_task", None)
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()

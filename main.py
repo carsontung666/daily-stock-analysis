@@ -253,8 +253,8 @@ def _reload_env_file_values_preserving_overrides() -> None:
     _RUNTIME_ENV_FILE_KEYS = managed_keys
 
 
-def parse_arguments() -> argparse.Namespace:
-    """解析命令行参数"""
+def parse_arguments(argv=None) -> argparse.Namespace:
+    """解析命令行参数（argv=None 时读 sys.argv）"""
     parser = argparse.ArgumentParser(
         description='A股自选股智能分析系统',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -416,7 +416,7 @@ def parse_arguments() -> argparse.Namespace:
         help='强制回测（即使已有回测结果也重新计算）'
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _compute_trading_day_filter(
@@ -1086,6 +1086,44 @@ def _build_schedule_time_provider(default_schedule_time: str):
     return _provider
 
 
+def _build_schedule_times_provider():
+    """Read the latest effective schedule times: SCHEDULE_TIMES, else single SCHEDULE_TIME.
+
+    Resolved via Config._resolve_env_value so process-override-vs-.env precedence stays
+    consistent regardless of which module triggers the read.
+    """
+    def _provider():
+        raw = Config._resolve_env_value("SCHEDULE_TIMES", default="", prefer_env_file=True) or ""
+        times = Config._parse_schedule_times(raw)
+        if times:
+            return times
+        single = (Config._resolve_env_value("SCHEDULE_TIME", default="18:00", prefer_env_file=True) or "").strip()
+        return [single] if single else []
+
+    return _provider
+
+
+def _build_schedule_enabled_provider():
+    """Read the latest SCHEDULE_ENABLED (canonical process-override-vs-.env precedence)."""
+    def _provider():
+        raw = Config._resolve_env_value("SCHEDULE_ENABLED", default="false", prefer_env_file=True) or "false"
+        return raw.strip().lower() == "true"
+
+    return _provider
+
+
+def build_scheduled_task(args=None, stock_codes=None):
+    """Build the callable a scheduler runs: reload config, run one full analysis."""
+    resolved_args = args if args is not None else parse_arguments([])
+    scheduled_stock_codes = _resolve_scheduled_stock_codes(stock_codes)
+
+    def _task():
+        runtime_config = _reload_runtime_config()
+        run_full_analysis(runtime_config, resolved_args, scheduled_stock_codes)
+
+    return _task
+
+
 def main() -> int:
     """
     主入口函数
@@ -1252,13 +1290,13 @@ def main() -> int:
             return 0
 
         # 模式2: 定时任务模式
-        if args.schedule or config.schedule_enabled:
+        # 单一 owner：有 Web 服务时调度由 lifespan 运行时服务负责，CLI 不起调度
+        schedule_requested = args.schedule or config.schedule_enabled
+        if schedule_requested and not start_serve:
             logger.info("模式: 定时任务")
             logger.info(f"每日执行时间: {config.schedule_time}")
 
-            # Determine whether to run immediately:
-            # Command line arg --no-run-immediately overrides config if present.
-            # Otherwise use config (defaults to True).
+            # --no-run-immediately 覆盖配置；否则用配置（默认 True）
             should_run_immediately = config.schedule_run_immediately
             if getattr(args, 'no_run_immediately', False):
                 should_run_immediately = False
@@ -1266,12 +1304,10 @@ def main() -> int:
             logger.info(f"启动时立即执行: {should_run_immediately}")
 
             from src.scheduler import run_with_schedule
-            scheduled_stock_codes = _resolve_scheduled_stock_codes(stock_codes)
             schedule_time_provider = _build_schedule_time_provider(config.schedule_time)
-
-            def scheduled_task():
-                runtime_config = _reload_runtime_config()
-                run_full_analysis(runtime_config, args, scheduled_stock_codes)
+            schedule_times_provider = _build_schedule_times_provider()
+            initial_times = getattr(config, 'effective_schedule_times', None) or [config.schedule_time]
+            scheduled_task = build_scheduled_task(args, stock_codes)
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):
@@ -1299,19 +1335,24 @@ def main() -> int:
                 run_immediately=should_run_immediately,
                 background_tasks=background_tasks,
                 schedule_time_provider=schedule_time_provider,
+                schedule_times=initial_times,
+                schedule_times_provider=schedule_times_provider,
             )
             return 0
 
-        # 模式3: 正常单次运行
-        if config.run_immediately:
+        if schedule_requested and start_serve:
+            logger.info("定时调度由 Web 服务接管（运行时调度服务），跳过 CLI 调度路径")
+
+        # 模式3: 正常单次运行（调度模式下启动执行交给 SCHEDULE_RUN_IMMEDIATELY）
+        if not schedule_requested and config.run_immediately:
             run_full_analysis(config, args, stock_codes)
-        else:
+        elif not schedule_requested:
             logger.info("配置为不立即运行分析 (RUN_IMMEDIATELY=false)")
 
         logger.info("\n程序执行完成")
 
-        # 如果启用了服务且是非定时任务模式，保持程序运行
-        keep_running = start_serve and not (args.schedule or config.schedule_enabled)
+        # 有 Web 服务则保活；调度由 lifespan 负责
+        keep_running = start_serve
         if keep_running:
             logger.info("API 服务运行中 (按 Ctrl+C 退出)...")
             try:
