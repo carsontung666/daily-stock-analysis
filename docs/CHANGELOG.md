@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [文档] 补充 AlphaSift 迁移与回退边界：明确 `ALPHASIFT_INSTALL_SPEC` 显式覆盖语义、`requirements.txt + DEFAULT_ALPHASIFT_INSTALL_SPEC` 与运行时兼容边界、以及回滚路径（关闭功能/完整 revert）说明，覆盖旧 pin 用户升级行为。
 
 - [新功能] 个股分析历史成功保存后会从最终报告 best-effort 提取 `DecisionSignal` 决策信号，复用现有信号去重、计划质量计算和脱敏契约。
+- [新功能] #1581 支持多时间点定时推送：新增 `SCHEDULE_TIMES`（逗号分隔 HH:MM，留空回退单时间 `SCHEDULE_TIME`，自动去重排序、忽略非法值）；serve/桌面常驻进程内由运行时调度服务驱动，网页保存或导入配置后运行期热更新启停、无需重启；同一进程仅一个调度 owner，并发或重叠触发按单实例锁跳过。
+- [新功能] #1581 新增 `GET /api/v1/system/scheduler/status` 与 `POST /api/v1/system/scheduler/run-now` 查看运行时调度状态与手动触发一次分析（已有任务执行中则跳过）；桌面端不再强制关闭定时，可在客户端启用。
 
 ## [3.22.0] - 2026-06-13
 

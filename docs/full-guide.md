@@ -688,7 +688,7 @@ schedule:
 
 ### 本地定时任务
 
-内建的定时任务调度器支持每天在指定时间（默认 18:00）运行分析。
+内建的定时任务调度器支持每天在一个或多个指定时间运行分析（默认 18:00）。
 
 #### 命令行方式
 
@@ -702,7 +702,11 @@ python main.py --schedule --no-run-immediately
 
 > 说明：定时模式每次触发前都会重新读取当前保存的 `STOCK_LIST`。如果同时传入 `--stocks`，该参数不会锁定后续计划执行的股票列表；需要临时只跑指定股票时，请使用非定时的单次运行命令。
 >
-> 从 `python main.py --schedule`、`python main.py --serve --schedule` 或等价内置调度模式启动后，WebUI 保存新的 `SCHEDULE_TIME` 会在下一轮调度检查内自动重绑 daily job，无需重启进程；旧的执行时间不会继续保留。
+> 从内置调度模式（`--schedule`）或常驻 Web/桌面服务启动后，在 WebUI 保存或导入配置修改 `SCHEDULE_ENABLED` / `SCHEDULE_TIME` / `SCHEDULE_TIMES`，会在运行期自动启停或重建调度，无需重启进程；旧的执行时间不会保留。常驻服务下同一进程只有一个调度 owner，并发或重叠触发按单实例锁跳过。
+>
+> 常驻服务下可用 `GET /api/v1/system/scheduler/status` 查看调度状态，`POST /api/v1/system/scheduler/run-now` 手动触发一次分析（已有任务执行中则跳过）。
+>
+> 注意：GitHub Actions 每日工作流是单次触发，不读取 `SCHEDULE_TIMES`；多时间点能力面向本地 / Docker / 常驻服务 / 桌面端。
 
 #### 环境变量方式
 
@@ -712,6 +716,7 @@ python main.py --schedule --no-run-immediately
 |--------|------|:-------:|:-----:|
 | `SCHEDULE_ENABLED` | 是否启用定时任务 | `false` | `true` |
 | `SCHEDULE_TIME` | 每日执行时间 (HH:MM) | `18:00` | `09:30` |
+| `SCHEDULE_TIMES` | 多个执行时间 (逗号分隔 HH:MM)，自动去重排序；留空则回退 `SCHEDULE_TIME` | 空 | `09:20,12:30,15:10` |
 | `SCHEDULE_RUN_IMMEDIATELY` | 定时模式启动时是否立即运行一次；未显式设置时沿用 `RUN_IMMEDIATELY` 的运行时覆盖语义 | `true` | `false` |
 | `RUN_IMMEDIATELY` | 非定时模式启动时是否立即运行一次；同时作为未显式设置 `SCHEDULE_RUN_IMMEDIATELY` 时的 legacy 回退 | `true` | `false` |
 | `TRADING_DAY_CHECK_ENABLED` | 交易日检查：非交易日跳过执行；设为 `false` 可强制执行 | `true` | `false` |
