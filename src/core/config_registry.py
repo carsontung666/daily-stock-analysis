@@ -2604,6 +2604,33 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": ["local_timezone"],
     },
+    "SCHEDULE_TIMES": {
+        "title": "Schedule Times",
+        "description": "Multiple daily schedule times, comma-separated HH:MM. Falls back to Schedule Time when empty.",
+        "category": "system",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [],
+        "validation": {
+            "pattern": r"^\s*$|^([01]\d|2[0-3]):[0-5]\d(\s*,\s*([01]\d|2[0-3]):[0-5]\d)*$"
+        },
+        "display_order": 9,
+        "help_key": "settings.system.schedule",
+        "examples": [
+            "SCHEDULE_TIMES=09:20,12:30,15:10,18:00",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：其他配置",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#其他配置",
+            },
+        ],
+        "warning_codes": ["local_timezone"],
+    },
     "HTTP_PROXY": {
         "title": "HTTP Proxy",
         "description": "Optional HTTP proxy endpoint.",

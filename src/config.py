@@ -894,6 +894,7 @@ class Config:
     # === 定时任务配置 ===
     schedule_enabled: bool = False            # 是否启用定时任务
     schedule_time: str = "18:00"              # 每日推送时间（HH:MM 格式）
+    schedule_times: List[str] = field(default_factory=list)  # 多个推送时间（HH:MM，逗号分隔），空则用 schedule_time
     schedule_run_immediately: bool = True     # 启动时是否立即执行一次
     run_immediately: bool = True              # 启动时是否立即执行一次（非定时模式）
     market_review_enabled: bool = True        # 是否启用大盘复盘
@@ -1009,6 +1010,7 @@ class Config:
             "RUN_IMMEDIATELY",
             "SCHEDULE_ENABLED",
             "SCHEDULE_TIME",
+            "SCHEDULE_TIMES",
             "SCHEDULE_RUN_IMMEDIATELY",
         }
     )
@@ -1418,6 +1420,12 @@ class Config:
             default='18:00',
             prefer_env_file=True,
         )
+        schedule_times_value = cls._resolve_env_value(
+            'SCHEDULE_TIMES',
+            default='',
+            prefer_env_file=True,
+        )
+        schedule_times = cls._parse_schedule_times(schedule_times_value)
 
         report_language_raw = cls._resolve_report_language_env_value(
             preexisting_report_language
@@ -1699,6 +1707,7 @@ class Config:
                 prefer_env_file=True,
             ).lower() == 'true',
             schedule_time=(schedule_time_value or '18:00').strip() or '18:00',
+            schedule_times=schedule_times,
             schedule_run_immediately=schedule_run_immediately,
             run_immediately=legacy_run_immediately,
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
@@ -2260,6 +2269,35 @@ class Config:
             news_max_age_days=self.news_max_age_days,
             news_strategy_profile=self.news_strategy_profile,
         )
+
+    _SCHEDULE_TIME_PATTERN = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
+
+    @classmethod
+    def _parse_schedule_times(cls, value: Optional[str]) -> List[str]:
+        """解析 SCHEDULE_TIMES（逗号分隔 HH:MM），去重排序，非法值忽略并告警。"""
+        if not value:
+            return []
+        seen = set()
+        valid: List[str] = []
+        for raw in str(value).split(','):
+            item = raw.strip()
+            if not item:
+                continue
+            if not cls._SCHEDULE_TIME_PATTERN.match(item):
+                logger.warning("无效的 SCHEDULE_TIMES 时间点 '%s'，已忽略", item)
+                continue
+            if item not in seen:
+                seen.add(item)
+                valid.append(item)
+        return sorted(valid)
+
+    @property
+    def effective_schedule_times(self) -> List[str]:
+        """生效的推送时间点：优先 schedule_times，为空时回退 schedule_time。"""
+        if self.schedule_times:
+            return list(self.schedule_times)
+        single = (self.schedule_time or '').strip()
+        return [single] if single else []
 
     @classmethod
     def _parse_market_review_region(cls, value: str) -> str:
