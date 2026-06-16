@@ -7,6 +7,7 @@
 
 import threading
 import unittest
+from datetime import datetime
 
 import schedule
 
@@ -63,6 +64,35 @@ class SchedulerMultiTimeTestCase(unittest.TestCase):
         s2 = _make(["09:00", "18:00"])
         self.assertEqual(len(s2._scheduler.get_jobs()), 2)  # 是 2，不是 4
         self.assertEqual(len(schedule.jobs), 0)  # 全局表全程为 0
+
+    def test_stop_does_not_interrupt_running_task(self):
+        # 任务跑到一半时 stop()：不中断，等它自己跑完，线程随后退出
+        entered = threading.Event()
+        release = threading.Event()
+        finished = []
+
+        def task():
+            entered.set()
+            release.wait(timeout=5)
+            finished.append(True)
+
+        s = Scheduler(schedule_times=["18:00"], install_signal_handlers=False)
+        s.set_daily_task(task, run_immediately=False)
+        # 强制 job 立即到期，使其在 run() 第一轮就触发
+        for job in s._scheduler.get_jobs():
+            job.next_run = datetime(2000, 1, 1, 0, 0, 0)
+
+        t = threading.Thread(target=s.run, daemon=True)
+        t.start()
+        self.assertTrue(entered.wait(timeout=5))  # 任务已开始并阻塞
+
+        s.stop()                                   # 请求停止
+        self.assertEqual(finished, [])             # 任务未被中断完成——仍卡着
+        release.set()                              # 放行，让任务自己跑完
+        t.join(timeout=5)
+
+        self.assertFalse(t.is_alive())
+        self.assertEqual(finished, [True])         # 任务完整跑完
 
     def test_run_exit_clears_instance_jobs(self):
         s = _make(["09:00", "18:00"])
