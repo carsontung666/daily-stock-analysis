@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for Scheduler background task support."""
+"""Tests for Scheduler background task support and daily-job reload."""
 
 from datetime import datetime
 import sys
@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 
 class _FakeJob:
-    def __init__(self, schedule_module):
-        self._schedule_module = schedule_module
+    def __init__(self, scheduler):
+        self._scheduler = scheduler
         self.next_run = datetime(2026, 1, 1, 18, 0, 0)
         self.at_time = None
 
@@ -25,11 +25,11 @@ class _FakeJob:
 
     def do(self, fn):
         self.job_func = fn
-        self._schedule_module.jobs.append(self)
+        self._scheduler.jobs.append(self)
         return self
 
 
-class _FakeScheduleModule:
+class _FakeScheduler:
     def __init__(self):
         self.jobs = []
 
@@ -43,16 +43,25 @@ class _FakeScheduleModule:
         return None
 
     def cancel_job(self, job):
-        self.jobs.remove(job)
+        if job in self.jobs:
+            self.jobs.remove(job)
+
+    def clear(self):
+        self.jobs = []
+
+
+class _FakeScheduleModule:
+    """伪 schedule 模块：Scheduler() 返回独立实例，模拟真实库的实例隔离。"""
+
+    Scheduler = _FakeScheduler
 
 
 class SchedulerBackgroundTaskTestCase(unittest.TestCase):
     def test_background_task_runs_when_interval_elapsed(self):
-        fake_schedule = _FakeScheduleModule()
-        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+        with patch.dict(sys.modules, {"schedule": _FakeScheduleModule()}):
             from src.scheduler import Scheduler
 
-            scheduler = Scheduler(schedule_time="18:00")
+            scheduler = Scheduler(schedule_time="18:00", install_signal_handlers=False)
             calls = []
             fake_thread = MagicMock()
             fake_thread.is_alive.return_value = False
@@ -67,11 +76,10 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
         self.assertEqual(calls, ["ran"])
 
     def test_background_task_waits_for_interval(self):
-        fake_schedule = _FakeScheduleModule()
-        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+        with patch.dict(sys.modules, {"schedule": _FakeScheduleModule()}):
             from src.scheduler import Scheduler
 
-            scheduler = Scheduler(schedule_time="18:00")
+            scheduler = Scheduler(schedule_time="18:00", install_signal_handlers=False)
             calls = []
             scheduler.add_background_task(lambda: calls.append("ran"), interval_seconds=60, run_immediately=False, name="test")
 
@@ -81,14 +89,13 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_run_with_schedule_registers_background_tasks_before_immediate_daily_task(self):
-        fake_schedule = _FakeScheduleModule()
-        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+        with patch.dict(sys.modules, {"schedule": _FakeScheduleModule()}):
             from src import scheduler as scheduler_module
 
             order = []
 
             class FakeScheduler:
-                def __init__(self, schedule_time="18:00", schedule_time_provider=None):
+                def __init__(self, schedule_time="18:00", schedule_time_provider=None, **kwargs):
                     order.append(("init", schedule_time))
                     order.append(("provider", callable(schedule_time_provider)))
 
@@ -116,45 +123,46 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
         self.assertEqual(order[:4], [("init", "18:00"), ("provider", False), ("background", "event_monitor"), ("daily", True)])
 
     def test_scheduler_reloads_daily_job_when_schedule_time_changes(self):
-        fake_schedule = _FakeScheduleModule()
-        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+        with patch.dict(sys.modules, {"schedule": _FakeScheduleModule()}):
             from src.scheduler import Scheduler
 
             scheduler = Scheduler(
                 schedule_time="18:00",
                 schedule_time_provider=lambda: "09:30",
+                install_signal_handlers=False,
             )
             scheduler.set_daily_task(lambda: None, run_immediately=False)
 
-            self.assertEqual(len(fake_schedule.jobs), 1)
-            self.assertEqual(fake_schedule.jobs[0].at_time, "18:00")
+            self.assertEqual(scheduler.scheduled_times, ["18:00"])
+            self.assertEqual(scheduler._scheduler.get_jobs()[0].at_time, "18:00")
 
             scheduler._refresh_daily_schedule_if_needed()
 
-        self.assertEqual(len(fake_schedule.jobs), 1)
-        self.assertEqual(fake_schedule.jobs[0].at_time, "09:30")
+        self.assertEqual(scheduler.scheduled_times, ["09:30"])
+        self.assertEqual(len(scheduler._scheduler.get_jobs()), 1)
+        self.assertEqual(scheduler._scheduler.get_jobs()[0].at_time, "09:30")
         self.assertEqual(scheduler.schedule_time, "09:30")
 
     def test_scheduler_keeps_existing_daily_job_when_schedule_time_invalid(self):
-        fake_schedule = _FakeScheduleModule()
-        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+        with patch.dict(sys.modules, {"schedule": _FakeScheduleModule()}):
             from src.scheduler import Scheduler
 
             scheduler = Scheduler(
                 schedule_time="18:00",
                 schedule_time_provider=lambda: "25:99",
+                install_signal_handlers=False,
             )
             scheduler.set_daily_task(lambda: None, run_immediately=False)
 
             scheduler._refresh_daily_schedule_if_needed()
 
-        self.assertEqual(len(fake_schedule.jobs), 1)
-        self.assertEqual(fake_schedule.jobs[0].at_time, "18:00")
+        self.assertEqual(scheduler.scheduled_times, ["18:00"])
+        self.assertEqual(len(scheduler._scheduler.get_jobs()), 1)
+        self.assertEqual(scheduler._scheduler.get_jobs()[0].at_time, "18:00")
         self.assertEqual(scheduler.schedule_time, "18:00")
 
     def test_scheduler_keeps_current_daily_job_when_schedule_time_provider_fails(self):
-        fake_schedule = _FakeScheduleModule()
-        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+        with patch.dict(sys.modules, {"schedule": _FakeScheduleModule()}):
             from src.scheduler import Scheduler
 
             provider_calls = {"count": 0}
@@ -168,29 +176,30 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
             scheduler = Scheduler(
                 schedule_time="18:00",
                 schedule_time_provider=provider,
+                install_signal_handlers=False,
             )
             scheduler.set_daily_task(lambda: None, run_immediately=False)
 
             scheduler._refresh_daily_schedule_if_needed()
             scheduler._refresh_daily_schedule_if_needed()
 
-        self.assertEqual(len(fake_schedule.jobs), 1)
-        self.assertEqual(fake_schedule.jobs[0].at_time, "09:30")
+        self.assertEqual(scheduler.scheduled_times, ["09:30"])
+        self.assertEqual(len(scheduler._scheduler.get_jobs()), 1)
+        self.assertEqual(scheduler._scheduler.get_jobs()[0].at_time, "09:30")
         self.assertEqual(scheduler.schedule_time, "09:30")
 
     def test_scheduler_rejects_invalid_initial_schedule_time(self):
-        fake_schedule = _FakeScheduleModule()
-        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+        with patch.dict(sys.modules, {"schedule": _FakeScheduleModule()}):
             from src.scheduler import Scheduler
 
-            scheduler = Scheduler(schedule_time="25:99")
+            scheduler = Scheduler(schedule_time="25:99", install_signal_handlers=False)
             calls = []
 
             with self.assertRaisesRegex(ValueError, "25:99"):
                 scheduler.set_daily_task(lambda: calls.append("ran"), run_immediately=True)
 
         self.assertEqual(calls, [])
-        self.assertEqual(fake_schedule.jobs, [])
+        self.assertEqual(scheduler._scheduler.get_jobs(), [])
 
 
 if __name__ == "__main__":
