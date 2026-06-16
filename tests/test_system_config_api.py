@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -87,6 +87,82 @@ class SystemConfigApiTestCase(unittest.TestCase):
         return SimpleNamespace(
             cookies=cookies if cookies is not None else {system_config.COOKIE_NAME: "valid-session-token"}
         )
+
+    def _request_with_scheduler(self, scheduler) -> SimpleNamespace:
+        req = self._build_request()
+        req.app = SimpleNamespace(state=SimpleNamespace(runtime_scheduler=scheduler))
+        return req
+
+    def test_put_config_reconciles_scheduler(self) -> None:
+        scheduler = MagicMock()
+        current = system_config.get_system_config(include_schema=False, service=self.service).model_dump()
+        system_config.update_system_config(
+            request=UpdateSystemConfigRequest(
+                config_version=current["config_version"],
+                reload_now=False,
+                items=[{"key": "SCHEDULE_TIMES", "value": "09:30,15:00"}],
+            ),
+            request_obj=self._request_with_scheduler(scheduler),
+            service=self.service,
+        )
+        scheduler.reconcile_from_config.assert_called_once()
+
+    def test_import_config_reconciles_scheduler(self) -> None:
+        # 导入改了调度字段时，运行中的调度器也要对齐
+        scheduler = MagicMock()
+        current = system_config.get_system_config(include_schema=False, service=self.service).model_dump()
+        system_config.import_system_config(
+            request_obj=self._request_with_scheduler(scheduler),
+            request=ImportSystemConfigRequest(
+                config_version=current["config_version"],
+                content="STOCK_LIST=600519\nSCHEDULE_ENABLED=true\nSCHEDULE_TIMES=08:00,20:00\n",
+                reload_now=False,
+            ),
+            service=self.service,
+        )
+        scheduler.reconcile_from_config.assert_called_once()
+
+    def test_scheduler_status_endpoint(self) -> None:
+        scheduler = MagicMock()
+        scheduler.status.return_value = {
+            "enabled": True,
+            "scheduler_running": True,
+            "task_running": False,
+            "schedule_times": ["09:30", "15:00"],
+            "next_run": "2026-06-18 09:30:00",
+            "last_started_at": None,
+            "last_finished_at": None,
+            "last_success": None,
+            "last_error": None,
+            "run_count": 0,
+            "skipped_count": 0,
+            "last_skipped_reason": None,
+        }
+        req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime_scheduler=scheduler)))
+        resp = system_config.get_scheduler_status(request_obj=req)
+        self.assertTrue(resp.available)
+        self.assertTrue(resp.enabled)
+        self.assertEqual(resp.schedule_times, ["09:30", "15:00"])
+
+    def test_scheduler_status_unavailable_without_service(self) -> None:
+        req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        resp = system_config.get_scheduler_status(request_obj=req)
+        self.assertFalse(resp.available)
+
+    def test_scheduler_run_now_triggers(self) -> None:
+        scheduler = MagicMock()
+        scheduler.run_now.return_value = True
+        req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime_scheduler=scheduler)))
+        resp = system_config.run_scheduler_now(request_obj=req)
+        self.assertTrue(resp.triggered)
+        scheduler.run_now.assert_called_once()
+
+    def test_scheduler_run_now_skipped_when_busy(self) -> None:
+        scheduler = MagicMock()
+        scheduler.run_now.return_value = False
+        req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime_scheduler=scheduler)))
+        resp = system_config.run_scheduler_now(request_obj=req)
+        self.assertFalse(resp.triggered)
 
     def _build_client_app(self) -> FastAPI:
         app = FastAPI()

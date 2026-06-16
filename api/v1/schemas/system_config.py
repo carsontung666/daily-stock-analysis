@@ -307,3 +307,28 @@ class SystemConfigConflictResponse(BaseModel):
     error: str
     message: str
     current_config_version: str
+
+
+class SchedulerStatusResponse(BaseModel):
+    """Runtime scheduler status snapshot."""
+
+    available: bool = False
+    enabled: bool = False
+    scheduler_running: bool = False
+    task_running: bool = False
+    schedule_times: List[str] = Field(default_factory=list)
+    next_run: Optional[str] = None
+    last_started_at: Optional[str] = None
+    last_finished_at: Optional[str] = None
+    last_success: Optional[bool] = None
+    last_error: Optional[str] = None
+    run_count: int = 0
+    skipped_count: int = 0
+    last_skipped_reason: Optional[str] = None
+
+
+class SchedulerRunNowResponse(BaseModel):
+    """Result of a manual scheduler trigger."""
+
+    triggered: bool
+    message: str

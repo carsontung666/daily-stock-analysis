@@ -14,6 +14,8 @@ from api.v1.schemas.system_config import (
     DiscoverLLMChannelModelsResponse,
     ExportSystemConfigResponse,
     ImportSystemConfigRequest,
+    SchedulerRunNowResponse,
+    SchedulerStatusResponse,
     SystemConfigConflictResponse,
     SystemConfigResponse,
     SystemConfigSchemaResponse,
@@ -39,6 +41,18 @@ from src.services.system_config_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _reconcile_scheduler(request: Request) -> None:
+    """配置写入后让运行时调度器对齐最新 .env；无服务/未初始化则跳过。"""
+    state = getattr(getattr(request, "app", None), "state", None)
+    service = getattr(state, "runtime_scheduler", None)
+    if service is None:
+        return
+    try:
+        service.reconcile_from_config()
+    except Exception as exc:
+        logger.warning("[scheduler] reconcile after config write failed: %s", exc)
 
 
 class EnvBackupAccessDenied(Exception):
@@ -159,6 +173,7 @@ def get_setup_status(
 )
 def update_system_config(
     request: UpdateSystemConfigRequest,
+    request_obj: Request = None,
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> UpdateSystemConfigResponse:
     """Validate and persist system configuration updates."""
@@ -169,6 +184,7 @@ def update_system_config(
             mask_token=request.mask_token,
             reload_now=request.reload_now,
         )
+        _reconcile_scheduler(request_obj)
         return UpdateSystemConfigResponse.model_validate(payload)
     except ConfigValidationError as exc:
         raise HTTPException(
@@ -280,6 +296,7 @@ def import_system_config(
             content=request.content,
             reload_now=request.reload_now,
         )
+        _reconcile_scheduler(request_obj)
         return UpdateSystemConfigResponse.model_validate(payload)
     except ConfigImportError as exc:
         raise HTTPException(
@@ -507,3 +524,43 @@ def get_system_config_schema(
                 "message": "Failed to load system configuration schema",
             },
         )
+
+
+@router.get(
+    "/scheduler/status",
+    response_model=SchedulerStatusResponse,
+    summary="Runtime scheduler status",
+    description="Return the in-process runtime scheduler status (available=false when not running).",
+)
+def get_scheduler_status(request_obj: Request) -> SchedulerStatusResponse:
+    """Return the runtime scheduler status snapshot."""
+    service = getattr(request_obj.app.state, "runtime_scheduler", None)
+    if service is None:
+        return SchedulerStatusResponse(available=False)
+    try:
+        return SchedulerStatusResponse(available=True, **service.status())
+    except Exception as exc:
+        logger.error("Failed to read scheduler status: %s", exc, exc_info=True)
+        return SchedulerStatusResponse(available=False)
+
+
+@router.post(
+    "/scheduler/run-now",
+    response_model=SchedulerRunNowResponse,
+    summary="Trigger one scheduled analysis now",
+    description="Manually run one analysis immediately; skipped if one is already running.",
+)
+def run_scheduler_now(request_obj: Request) -> SchedulerRunNowResponse:
+    """Manually trigger one analysis through the runtime scheduler."""
+    service = getattr(request_obj.app.state, "runtime_scheduler", None)
+    if service is None:
+        return SchedulerRunNowResponse(triggered=False, message="运行时调度服务不可用")
+    try:
+        triggered = service.run_now()
+    except Exception as exc:
+        logger.error("Failed to trigger scheduler run-now: %s", exc, exc_info=True)
+        return SchedulerRunNowResponse(triggered=False, message="触发失败")
+    return SchedulerRunNowResponse(
+        triggered=triggered,
+        message="已触发本次分析" if triggered else "已有任务在执行，已跳过",
+    )
